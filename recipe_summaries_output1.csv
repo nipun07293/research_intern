@@ -1,0 +1,38 @@
+Title,Caption,Summary,BLEU,ROUGE-1,ROUGE-L
+mystery casserole,a white plate topped with a slice of chicken enchita cassero,"
+Summary:
+
+1. Whisk eggs with milk, season, and cook gently in butter over low heat, stirring to form soft curds. Remove just before set, garnish, and serve hot.
+
+
+
+
+
+",0.54,4.42,4.42
+spicy fiesta,a plate of chicken faboa with vegetables and sauce,"Summary:
+
+1. Whisk eggs with milk, season, and cook gently in butter over low heat, stirring to form soft curds. Remove just before set, garnish, and serve hot.",0.89,5.78,5.78
+rainbow salad,a bowl of fruit salad with a spoon and fork,"
+Summary:
+
+1. Add egg salad to a bowl with carrots, cucumber, and cucumber sauce. Add a splash of soy sauce and serve with rice.",0.33,4.97,4.97
+morning stacks,a stack of pancakes with syrup and syrup,"Summary:
+
+1. Whisk eggs with milk, season, and cook gently in butter over low heat, stirring to form soft curds. Remove just before set, garnish, and serve hot.
+",0.69,8.94,7.82
+green pasta,a bowl of pesto pasta with basil and garlic,"Summary:
+
+1. Stir-fry garlic and ginger, add mixed vegetables and cook until crisp-tender. Pour in soy-oyster sauce mixture, cook 2 minutes, and serve over rice.",1.12,8.54,7.32
+BBQ crunch,a pan of chicken wings with sauce on top,"Summary:
+
+1. Mix bacon, cheese, and sour cream; top with buttery cornflake crumbs and bake at 350°F for 45 minutes until golden. Rest 5 minutes before serving.",1.56,9.25,9.25
+choco bomb,a black cake with gold decorations and a black cake topper,"Summary:
+
+1. Add choco-mush to a bowl with choco-mush sauce, stir to combine, and serve with choco-mush sauce.",0.45,2.86,2.86
+summer drink,a glass of orange juice,"Summary:
+
+1. Combine dry mix and cream cheese, then add sour cream, sugar, and vanilla extract; mix until smooth.",0.52,5.32,5.32
+"
+",,"Summary:
+
+1. Spread garlic-parsley butter on baguette halves, wrap in foil, bake at 350°F for 15 minutes, then unwrap for 5 more until crisp. Serve warm.",0,0,0
