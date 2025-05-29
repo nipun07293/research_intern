@@ -1,381 +1,210 @@
-from google.colab import drive
-# Modify the mount call to potentially force a remount if the default fails
-# If the initial mount fails, try uncommenting the line below:
-# drive.mount('/content/drive', force_remount=True)
-# Otherwise, keep the standard mount call:
-drive.mount('/content/drive')
-
+# !pip install transformers sentence-transformers rouge_score nltk
+!pip install rouge_score
+# Import libraries
 import os
 import pandas as pd
 from PIL import Image
-from transformers import BlipProcessor, BlipForConditionalGeneration, pipeline
+import numpy as np
 import torch
-import re # Import the regular expression module
 
-# 1) Model setup
-# Check if GPU is available and use it
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using device: {device}")
+# HuggingFace Transformers for BLIP and GPT-2
+from transformers import BlipProcessor, BlipForConditionalGeneration, pipeline
 
-# Using base models
-processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device) # Move model to device
+# Sentence-BERT for semantic similarity
+from sentence_transformers import SentenceTransformer, util
 
-# Using gpt2-medium again, as it might follow instructions better than base gpt2
-# (Note: this increases resource usage compared to base gpt2)
-text_generator = pipeline("text-generation", model="gpt2-medium", device=0 if torch.cuda.is_available() else -1) # Use gpt2-medium
-
-# 2) Helpers
-def generate_caption(path):
-    try:
-        img = Image.open(path).convert("RGB")
-        # Move inputs to the same device as the model
-        inputs = processor(img, return_tensors="pt").to(device)
-        # Generate caption, slightly longer max_length for more detail
-        out = blip_model.generate(**inputs, max_length=50, num_beams=4, early_stopping=True)
-        return processor.decode(out[0], skip_special_tokens=True)
-    except FileNotFoundError:
-        print(f"Error: Image file not found at {path}")
-        return "Error: Image not found"
-    except Exception as e:
-        print(f"Error processing image {path}: {e}")
-        return f"Error: {e}"
-
-
-def generate_summary(caption, title):
-    # Refined prompt asking for detailed, comprehensive instructions
-    prompt = (
-        f"Title: {title}\n"
-        f"Image Description: {caption}\n"
-        f"Write comprehensive step-by-step cooking instructions for this recipe, including ingredients and preparation details. Format as numbered steps:\n"
-        f"1." # Encourage the model to start with step 1
-    )
-
-    # Adjusted generation parameters for more detailed output
-    gen = text_generator(
-        prompt,
-        max_length=250, # Increased max length significantly
-        num_return_sequences=1,
-        do_sample=False, # Keep non-sampling
-        num_beams=4,     # Use beam search
-        early_stopping=True, # Stop when all beam hypotheses have a stop token
-        pad_token_id=text_generator.model.config.eos_token_id,
-        eos_token_id=text_generator.model.config.eos_token_id,
-    )[0]["generated_text"]
-
-    # Extract the generated part after the prompt
-    split_key = f"Write comprehensive step-by-step cooking instructions for this recipe, including ingredients and preparation details. Format as numbered steps:\n"
-    summary_part = gen.split(split_key)[-1].strip()
-
-    # Attempt a basic cleanup/re-numbering for better structure, but keep it relatively simple
-    lines = summary_part.split('\n')
-    cleaned_lines = []
-    step_counter = 1
-    # Regex to match a line starting with a number, optionally followed by . or ), then optional whitespace
-    # This regex has only one capturing group for the number (\d+)
-    step_start_pattern = re.compile(r'^\s*\d+[.\)]?\s*') # Added optional leading whitespace
-
-    for line in lines:
-        line = line.strip()
-        if not line: # Skip empty lines
-            continue
-
-        # Use search to find the step number pattern at the beginning of the line
-        match = step_start_pattern.search(line)
-
-        if match:
-            # If a step pattern is found, extract the text *after* the match
-            text_after_step = line[match.end():].strip()
-            # Append with the correct step counter
-            cleaned_lines.append(f"{step_counter}. {text_after_step}")
-            step_counter += 1
-        else:
-             # If the line doesn't start with a recognized step number pattern,
-             # just append it as a continuation or potentially a new unnumbered step.
-             # For simplicity and to avoid losing text, we'll just append it with the next number.
-             # A more sophisticated parser might try to merge these into the previous step.
-             cleaned_lines.append(f"{step_counter}. {line}")
-             step_counter += 1 # Increment anyway to avoid huge single steps
-
-
-    # Join the cleaned lines. Limit the number of steps to keep output manageable.
-    # The original code limited to 5 steps, let's keep that for consistency with the provided code state.
-    formatted_summary = "\n".join(cleaned_lines[:5])
-
-    # Fallback: If cleaning produces nothing, return the raw split text
-    if not formatted_summary and summary_part:
-        return summary_part
-    elif not formatted_summary: # If even the raw split text is empty
-        return "Summary generation failed."
-
-    return formatted_summary
-
-
-# 3) Filepaths & CSVs
-# Update image directory paths to point to Google Drive
-# Assuming 'training' and 'testing' folders are directly within your Google Drive's "My Drive"
-TRAIN_IMG_DIR = "/content/drive/MyDrive/training"
-TEST_IMG_DIR  = "/content/drive/MyDrive/testing"
-TRAIN_CSV     = "/content/drive/MyDrive/train_set1.csv" # Ensure this points to your train CSV
-TEST_CSV      = "/content/drive/MyDrive/test_set2.csv"   # Ensure this points to your test CSV
-
-# Read both dataframes
-try:
-    train_df = pd.read_csv(TRAIN_CSV)
-    test_df = pd.read_csv(TEST_CSV)
-    print(f"Loaded train set with {len(train_df)} rows")
-    print(f"Loaded test set with {len(test_df)} rows")
-except FileNotFoundError as e:
-    print(f"Error loading CSV file: {e}")
-    print("Please ensure train_set1.csv and test_set2.csv are in your Google Drive's 'My Drive' folder.")
-    train_df = pd.DataFrame() # Create empty dataframes to avoid errors
-    test_df = pd.DataFrame()
-
-
-# 4) Process TRAIN set (Subset) → train_improved_summaries.csv
-train_out = []
-if not train_df.empty:
-    print("\nProcessing training set subset...")
-    # Process only the first 5 rows for quick testing
-    train_subset_df = train_df.head(10)
-    print(f"Processing a subset of {len(train_subset_df)} train samples.")
-
-    for index, row in train_subset_df.iterrows(): # Iterate over the train subset
-        img_path = os.path.join(TRAIN_IMG_DIR, row["image_name"])
-        print(f"Processing {img_path} ({index+1}/{len(train_subset_df)})...")
-        caption = generate_caption(img_path)
-
-        summary = "" # Initialize summary
-        # Only attempt to generate summary if caption generation was successful
-        if not caption.startswith("Error:"):
-             # Generate summary using the improved prompt/params
-             summary = generate_summary(caption, row["noisy_title"])
-        else:
-            summary = "Summary not generated due to caption error."
-
-
-        train_out.append({
-            "image_name":        row["image_name"],
-            "noisy_title":       row["noisy_title"],
-            "full_instructions": row.get("full_instructions", "N/A"), # Get instructions if column exists, default to N/A
-            "caption":           caption,
-            "generated_summary": summary # Added generated summary to train output
-        })
-
-    # Define BASE path for saving output files
-    BASE = "/content/drive/MyDrive/"
-
-    train_output_path = os.path.join(BASE, "train_improved_summaries.csv") # New output filename
-    pd.DataFrame(train_out).to_csv(
-        train_output_path,
-        index=False
-    )
-    print(f"→ Wrote training set results to {train_output_path}")
-else:
-    print("Training dataframe is empty. Skipping training set processing.")
-
-
-# 5) Process TEST set (Subset) → test_improved_summaries.csv
-test_out = []
-if not test_df.empty:
-    print("\nProcessing test set subset...")
-    # Process only the first 5 rows for quick testing
-    test_subset_df = test_df.head(7)
-    print(f"Processing a subset of {len(test_subset_df)} test samples.")
-
-    for index, row in test_subset_df.iterrows(): # Iterate over the test subset
-        img_path = os.path.join(TEST_IMG_DIR, row["image_name"])
-        print(f"Processing {img_path} ({index+1}/{len(test_subset_df)})...")
-        caption = generate_caption(img_path)
-
-        summary = "" # Initialize summary
-        # Only attempt to generate summary if caption generation was successful
-        if not caption.startswith("Error:"):
-            # Generate summary using the improved prompt/params
-            summary = generate_summary(caption, row["noisy_title"])
-        else:
-            summary = "Summary not generated due to caption error."
-
-
-        test_out.append({
-            "image_name":        row["image_name"],
-            "noisy_title":       row["noisy_title"],
-            "original_instructions": row.get("full_instructions", "N/A"), # Get instructions if column exists, default to N/A
-            "caption":           caption,
-            "generated_summary": summary
-        })
-
-    # Define BASE path for saving output files
-    BASE = "/content/drive/MyDrive/"
-
-    # Update output filename
-    test_output_path = os.path.join(BASE, "test_improved_summaries1.csv") # New output filename
-    pd.DataFrame(test_out).to_csv(
-        test_output_path,
-        index=False
-    )
-    print(f"→ Wrote test set results to {test_output_path}")
-else:
-     print("Test dataframe is empty. Skipping test set processing.")
-  import nltk
-# Removed corpus_bleu
+# Evaluation metrics
 from rouge_score import rouge_scorer
-import pandas as pd
-import os
-import string # Import string for punctuation removal
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+import nltk
 
-# Download necessary NLTK data (if not already downloaded)
-# Keep existing downloads. 'punkt' is essential for tokenization.
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    print("NLTK 'punkt' not found, downloading...")
-    nltk.download('punkt')
-except Exception as e:
-    print(f"An unexpected error occurred while checking/downloading NLTK 'punkt': {e}")
+nltk.download('punkt')  # for BLEU tokenization
 
-try:
-    nltk.data.find('corpora/wordnet')
-except LookupError:
-     print("NLTK 'wordnet' not found, downloading...")
-     nltk.download('wordnet')
-except Exception as e:
-    print(f"An unexpected error occurred while checking/downloading NLTK 'wordnet': {e}")
+# (Optional) Mount Google Drive (run in Colab if using Drive)
+from google.colab import drive
+drive.mount('/content/drive')
+# train_csv_path = "/content/drive/MyDrive/train_set_new.csv"
+# --- Setup paths ---
+drive_path = "/content/drive/MyDrive"  # Base Drive path
 
-try:
-    nltk.data.find('corpora/omw-1.4')
-except LookupError:
-    print("NLTK 'omw-1.4' not found, downloading...")
-    nltk.download('omw-1.4')
-except Exception as e:
-     print(f"An unexpected error occurred while checking/downloading NLTK 'omw-1.4': {e}")
+# CSV file paths
+train_csv = os.path.join(drive_path, "train_set_new.csv")
+test_csv  = os.path.join(drive_path, "test_set_new.csv")
 
-# Helper function for basic text cleaning (still needed for ROUGE stemmer)
-# No longer needs to return tokens as ROUGE scorer takes strings
-def clean_text_for_rouge(text):
-    """
-    Basic cleaning: remove punctuation and convert to lower case.
-    RougeScorer with use_stemmer=True handles stemming internally.
-    """
-    if pd.isna(text) or not isinstance(text, str):
-        return "" # Return empty string for invalid input
+# Image directory paths
+train_img_dir = os.path.join(drive_path, "training")
+test_img_dir  = os.path.join(drive_path, "testing")
 
-    # Convert to lowercase
-    text = text.lower()
-    # Remove punctuation (this is a simple way, may need refinement)
-    # Added handling for dash within words if necessary, but simple removal is often okay for ROUGE
-    text = text.translate(str.maketrans('', '', string.punctuation))
-    return text.strip()
+# Output file path
+output_path = os.path.join(drive_path, "test_few_shot_results.csv")
 
+# --- Load data ---
+train_df = pd.read_csv(train_csv)
+test_df = pd.read_csv(test_csv)
 
-# --- Ensure this part is run AFTER the test data processing cell ---
-# This is the BASE path where your CSV files are saved
-BASE_PATH = "/content/drive/MyDrive/"
-# --- Make sure the filename matches the one saved in the previous cell ---
-test_results_filename = "test_improved_summaries.csv"
-test_results_path = os.path.join(BASE_PATH, test_results_filename)
+# --- Add full image paths ---
+train_df['image_path'] = train_df['image_name'].fillna('').astype(str).apply(lambda x: os.path.join(train_img_dir, x))
+test_df['image_path'] = test_df['image_name'].fillna('').astype(str).apply(lambda x: os.path.join(test_img_dir, x))
 
-print(f"Attempting to load test results from: {test_results_path}")
-
-test_results_df = pd.DataFrame() # Initialize empty DataFrame
-
-# Check if the test results file exists before trying to read it
-if not os.path.exists(test_results_path):
-    print(f"Error: Test results file not found at {test_results_path}")
-    print("Please ensure the test processing cell was run successfully and the file name is correct.")
-else:
+# --- Info ---
+print(f"Training examples: {len(train_df)}, Test examples: {len(test_df)}")
+print("Columns in training set:", train_df.columns.tolist())
+# Load BLIP model and processor
+blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+blip_model.eval().to('cuda' if torch.cuda.is_available() else 'cpu')
+def generate_caption(image_path):
+    """Generate a caption for an image using BLIP."""
     try:
-        # Attempt to read the CSV, trying different encodings if necessary
-        try:
-            test_results_df = pd.read_csv(test_results_path)
-        except UnicodeDecodeError:
-            print("UnicodeDecodeError encountered, trying 'latin-1' encoding...")
-            try:
-                test_results_df = pd.read_csv(test_results_path, encoding='latin-1')
-            except Exception as e:
-                print(f"Failed to read CSV with 'latin-1' encoding: {e}")
-                print("Please check the file encoding and content for issues.")
-
-        if not test_results_df.empty:
-             print(f"Successfully loaded {len(test_results_df)} rows from {test_results_path}")
-        else:
-             print(f"Loaded CSV file is empty or failed to load correctly.")
-
-    except FileNotFoundError: # This should be caught by os.path.exists, but kept as a safeguard
-        print(f"Error: File not found during read_csv: {test_results_path}")
+        raw_image = Image.open(image_path).convert('RGB')
     except Exception as e:
-        print(f"An unexpected error occurred while reading the CSV: {e}")
+        print(f"Error opening {image_path}: {e}")
+        return ""
+    inputs = blip_processor(images=raw_image, return_tensors="pt")
+    inputs = {k: v.to(blip_model.device) for k, v in inputs.items()}
+    out = blip_model.generate(**inputs)
+    caption = blip_processor.decode(out[0], skip_special_tokens=True)
+    return caption
+
+# Example: generate caption for the first training image
+example_caption = generate_caption(train_df.iloc[0]['image_path'])
+print("Example BLIP caption:", example_caption)
+# Encode all training titles
+# Encode all training titles
+st_model = SentenceTransformer('all-MiniLM-L6-v2')
+# Assuming the title column is named 'noisy_title' based on previous code
+train_titles = train_df['noisy_title'].tolist()
+train_embeddings = st_model.encode(train_titles, convert_to_tensor=True)
+
+def get_top_k_examples(query_title, k=3):
+    """Return indices of the top-k training examples semantically similar to query_title."""
+    query_embedding = st_model.encode(query_title, convert_to_tensor=True)
+    cosine_scores = util.cos_sim(query_embedding, train_embeddings)[0]
+    top_results = torch.topk(cosine_scores, k)
+    return top_results.indices.tolist()
+
+# Example: find 3 similar titles to a sample test title
+# Assuming the title column in test_df is also 'noisy_title'
+sample_title = test_df.iloc[0]['noisy_title']
+similar_indices = get_top_k_examples(sample_title, k=3)
+# Display the similar titles using the correct column name
+print("Similar training titles:", train_df.loc[similar_indices, 'noisy_title'].values)
+def construct_prompt(test_title, test_caption, example_indices):
+    """Build the few-shot prompt string using given example indices."""
+    prompt = "Examples:\n"
+    for idx in example_indices:
+        ex_title = train_df.loc[idx, 'noisy_title']
+        # Generate or retrieve the caption for the training image
+        ex_image_path = train_df.loc[idx, 'image_path']
+        ex_caption = generate_caption(ex_image_path)
+        # Use the provided 2-step summary from training set
+        ex_summary = train_df.loc[idx, 'summary']
+        # Split the summary into two lines if needed
+        summary_lines = [line.strip() for line in str(ex_summary).split('\n') if line.strip()]
+        # Format summary as two bullet points
+        prompt += f"Title: {ex_title}\n"
+        prompt += f"Caption: {ex_caption}\n"
+        prompt += "Summary:\n"
+        for i, line in enumerate(summary_lines[:2], start=1):
+            prompt += f"{i}. {line}\n"
+        prompt += "\n"
+    # Add the new recipe prompt
+    prompt += f"New Recipe:\nTitle: {test_title}\n"
+    prompt += f"Visual Context: {test_caption}\n"
+    prompt += "Generate comprehensive 2-step cooking summary:"
+    return prompt
+
+# Example: construct prompt for the first test sample
+test_title = test_df.iloc[0]['noisy_title']
+test_caption = generate_caption(test_df.iloc[0]['image_path'])
+topk_indices = get_top_k_examples(test_title, k=3)
+prompt = construct_prompt(test_title, test_caption, topk_indices)
+print(prompt[:200] + "...")  # print beginning of prompt
+# Initialize the GPT-2 text generation pipeline
+generator = pipeline('text-generation', model='gpt2-medium', tokenizer='gpt2-medium',
+                     device=0 if torch.cuda.is_available() else -1)
+
+def generate_summary(prompt_text, max_length=200):
+    """Generate summary text from prompt using GPT-2."""
+    result = generator(prompt_text, max_length=max_length, num_return_sequences=1, do_sample=False)
+    generated = result[0]['generated_text']
+    # Remove the prompt part to isolate the summary
+    summary_text = generated.replace(prompt_text, "").strip()
+    # If the model output includes a third step, cut it off
+    if "3." in summary_text:
+        summary_text = summary_text.split("3.")[0].strip()
+    return summary_text
+
+# Example: generate summary for the first test recipe
+summary_output = generate_summary(prompt)
+print("Generated Summary:\n", summary_output)
+# Initialize metrics
+smooth_fn = SmoothingFunction().method4
+scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
+
+# Download the required NLTK data
+import nltk
+nltk.download('punkt_tab', quiet=True)
+
+results = []
+for idx in range(min(10, len(test_df))):
+    test_title = test_df.loc[idx, 'noisy_title']
+    test_caption = generate_caption(test_df.loc[idx, 'image_path'])
+    example_indices = get_top_k_examples(test_title, k=3)
+    prompt = construct_prompt(test_title, test_caption, example_indices)
+    gen_summary = generate_summary(prompt)
+
+    # Clean numbering for evaluation
+    cleaned_summary = "\n".join([line.strip()[line.find('.')+1:].strip()
+                                 for line in gen_summary.split('\n') if line.strip()])
+
+    # Get reference text and ensure it's a string before processing
+    reference_text_raw = test_df.loc[idx, 'orignal_instructions']
+    # Convert to string, handling potential NaN values
+    reference_text = str(reference_text_raw) if pd.notna(reference_text_raw) else ""
 
 
-# references = [] # Removed BLEU lists
-# candidates = [] # Removed BLEU lists
-
-# Check if the necessary columns exist before proceeding with evaluation
-# You MUST have 'original_instructions' in your test results CSV to evaluate ROUGE
-required_cols_for_eval = ["original_instructions", "generated_summary"]
-
-if not test_results_df.empty and all(col in test_results_df.columns for col in required_cols_for_eval):
-    print("\nPreparing data for ROUGE evaluation...")
-
-    # Prepare lists of strings for ROUGE evaluation
-    # Filter out rows where original or generated summary is empty or an error message
-    rouge_data = [(clean_text_for_rouge(row.get("original_instructions", "")),
-                   clean_text_for_rouge(row.get("generated_summary", "")))
-                  for index, row in test_results_df.iterrows()
-                  if pd.notna(row.get("original_instructions")) and
-                     pd.notna(row.get("generated_summary")) and
-                     not str(row.get("generated_summary", "")).startswith("Summary not generated")]
-
-    # Filter out pairs where cleaning resulted in empty strings
-    rouge_data = [(ref, cand) for ref, cand in rouge_data if ref and cand]
-
-
-    rouge_references_str = [item[0] for item in rouge_data]
-    rouge_candidates_str = [item[1] for item in rouge_data]
-
-    print(f"Evaluating {len(rouge_data)} valid samples for ROUGE.")
-
-    # Calculate ROUGE scores
-    scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
-    all_rouge_scores = []
-
-    if rouge_references_str and rouge_candidates_str and len(rouge_references_str) == len(rouge_candidates_str):
-        print("\nCalculating ROUGE scores...")
-        for ref_str, cand_str in zip(rouge_references_str, rouge_candidates_str):
-             # Ensure both reference and candidate are not empty strings for scoring (should be covered by list comprehension)
-             # Add a check for empty strings *after* cleaning, just in case.
-             if ref_str and cand_str:
-                 scores = scorer.score(ref_str, cand_str)
-                 all_rouge_scores.append(scores)
-
-
-        # Calculate average ROUGE scores
-        if all_rouge_scores:
-            avg_rouge1_f = sum(score['rouge1'].fmeasure for score in all_rouge_scores) / len(all_rouge_scores)
-            avg_rouge2_f = sum(score['rouge2'].fmeasure for score in all_rouge_scores) / len(all_rouge_scores)
-            avg_rougeL_f = sum(score['rougeL'].fmeasure for score in all_rouge_scores) / len(all_rouge_scores)
-
-            # Optionally also print precision and recall
-            avg_rouge1_p = sum(score['rouge1'].precision for score in all_rouge_scores) / len(all_rouge_scores)
-            avg_rouge1_r = sum(score['rouge1'].recall for score in all_rouge_scores) / len(all_rouge_scores)
-            avg_rouge2_p = sum(score['rouge2'].precision for score in all_rouge_scores) / len(all_rouge_scores)
-            avg_rouge2_r = sum(score['rouge2'].recall for score in all_rouge_scores) / len(all_rouge_scores)
-            avg_rougeL_p = sum(score['rougeL'].precision for score in all_rouge_scores) / len(all_rouge_scores)
-            avg_rougeL_r = sum(score['rougeL'].recall for score in all_rouge_scores) / len(all_rouge_scores)
-
-
-            print(f"Average ROUGE-1 F-measure: {avg_rouge1_f:.4f} (P: {avg_rouge1_p:.4f}, R: {avg_rouge1_r:.4f})")
-            print(f"Average ROUGE-2 F-measure: {avg_rouge2_f:.4f} (P: {avg_rouge2_p:.4f}, R: {avg_rouge2_r:.4f})")
-            print(f"Average ROUGE-L F-measure: {avg_rougeL_f:.4f} (P: {avg_rougeL_p:.4f}, R: {avg_rougeL_r:.4f})")
-        else:
-            print("No valid ROUGE scores calculated (all samples skipped).")
+    # Compute BLEU (sentence_bleu expects tokens)
+    # Ensure reference_text is not empty before tokenizing
+    if reference_text:
+        ref_tokens = nltk.word_tokenize(reference_text.lower())
     else:
-        print("Insufficient valid data to calculate ROUGE scores.")
+        ref_tokens = [] # Handle empty reference string
 
-else:
-    if test_results_df.empty:
-         print("\nSkipping evaluation as test results dataframe is empty.")
-    elif not all(col in test_results_df.columns for col in required_cols_for_eval):
-         print(f"\nSkipping evaluation: Test results dataframe is missing required columns for evaluation.")
-         print(f"Needed: {required_cols_for_eval}, Found: {test_results_df.columns.tolist()}")
-         print("Please ensure 'original_instructions' column is included when saving the test results CSV.")
+    hyp_tokens = nltk.word_tokenize(cleaned_summary.lower())
+
+    # Handle cases where hypothesis is empty to avoid errors in sentence_bleu
+    if hyp_tokens and ref_tokens:
+        bleu_score = sentence_bleu([ref_tokens], hyp_tokens, smoothing_function=smooth_fn)
+    else:
+        bleu_score = 0.0 # Assign 0 BLEU score if either is empty
+
+    # Compute ROUGE scores (F1)
+    # Ensure both reference and candidate are non-empty strings for ROUGE
+    if reference_text and cleaned_summary:
+        rouge_scores = scorer.score(reference_text, cleaned_summary)
+        rouge1_f = rouge_scores['rouge1'].fmeasure
+        rougel_f = rouge_scores['rougeL'].fmeasure
+    else:
+        rouge1_f = 0.0
+        rougel_f = 0.0
+
+    results.append({
+        'Title': test_title,
+        'Caption': test_caption,
+        'Summary': gen_summary,
+        'BLEU': round(bleu_score * 100, 2),
+        'ROUGE-1': round(rouge1_f * 100, 2),
+        'ROUGE-L': round(rougel_f * 100, 2)
+    })
+
+    print(f"Example {idx+1} - BLEU: {bleu_score:.3f}, ROUGE-1: {rouge1_f:.3f}, ROUGE-L: {rougel_f:.3f}")
+if results:
+    avg_bleu = np.mean([r['BLEU'] for r in results])
+    avg_rouge1 = np.mean([r['ROUGE-1'] for r in results])
+    avg_rougel = np.mean([r['ROUGE-L'] for r in results])
+    print(f"\nAverage BLEU: {avg_bleu:.2f}, ROUGE-1: {avg_rouge1:.2f}, ROUGE-L: {avg_rougel:.2f}")
+    results_df = pd.DataFrame(results)
+output_path = os.path.join(drive_path, "recipe_summaries_output1.csv")
+results_df.to_csv(output_path, index=False)
+print(f"Saved summaries and metrics to {output_path}")
